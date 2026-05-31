@@ -1,35 +1,46 @@
-# Flow Emotion Adapter Training Design - Detailed Report
+# 情绪 Flow Adapter 训练设计 - 详细报告
 
-Date: 2026-05-31
-Repo: `/test1208/zw/ctm_emotion_tts/repos/CosyVoice`
-Branch: `exp/emotion-flow-separation-probe`
+日期：2026-05-31  
+仓库：`/test1208/zw/ctm_emotion_tts/repos/CosyVoice`  
+分支：`exp/emotion-flow-separation-probe`
 
-## 0. Boundary
+## 0. 本文边界
 
-This document plans the training code. It does not report trained results.
+本文只规划训练代码和验证路线，不汇报训练结果，也不启动训练。
 
-Hard constraints:
+硬性边界：
 
-- Do not train or fine-tune the whole CosyVoice model in the first pass.
-- Freeze CosyVoice LLM, flow encoder, DiT estimator, and vocoder.
-- Train only a small module that injects an emotion-biased velocity residual during flow generation.
-- Treat the proposed split as empirical residual guidance, not a proven semantic/emotion disentanglement.
-- Use flow time as `s`; use speech/token/mel frame time as `k`.
-- Use `/test1208/zw/ctm_emotion_tts` paths only.
+- 本阶段不训练完整 CosyVoice。
+- 冻结 LLM、flow encoder、DiT estimator、HiFT vocoder。
+- 只训练一个很小的情绪速度残差模块。
+- 不声称语义 flow 和情绪 flow 已被完美分解。
+- CTM / emotion residual 只作为经验性的 emotion-biased residual guidance。
+- flow 时间统一记为 `s`，语音/mel/token 帧时间统一记为 `k`。
+- 路径统一使用 `/test1208/zw/ctm_emotion_tts`。
 
-The research question is narrow:
+核心问题：
 
-> Given parallel neutral/emotional speech for the same text and speaker, can a small module learn a velocity residual channel that controls perceived emotion intensity while preserving the frozen model's semantic/speaker channel?
+> 在同一句文本、同一个说话人、neutral audio 与 emotional audio 成对的条件下，能不能训练出一个小模块，在 flow 生成阶段提供一个可调强度的情绪速度残差，并且这个残差对最终音频有实际情绪控制意义？
 
-## 1. Literature Grounding
+用户给出的目标形式是：
 
-### 1.1 Flow matching
+```text
+v_base = flow(x_s, text, speaker, neutral_ref)
+delta_v = adapter(emotion_ref - neutral_ref)
+v_new = v_base + alpha * delta_v
+```
 
-Flow Matching trains a continuous vector field by regressing the velocity of a probability path from noise to data. The original paper describes FM as a simulation-free objective for continuous normalizing flows and explicitly frames it as vector-field regression over fixed conditional probability paths:
+本文把它落到 CosyVoice3 当前代码中，形成一个 adapter-only 的可验证训练方案。
+
+## 1. 方法调研基础
+
+### 1.1 Flow Matching
+
+Flow Matching 的关键思想是直接回归从噪声到数据分布路径上的速度场，而不是显式模拟扩散反向过程。相关论文：
 
 - Flow Matching for Generative Modeling: https://arxiv.org/abs/2210.02747
 
-For this experiment, the useful part is not full CNF likelihood training. The useful part is the local supervised target:
+对本实验真正有用的是这个局部监督形式：
 
 ```text
 x_s = (1 - (1 - sigma_min) * s) * z + s * x_1
@@ -37,81 +48,87 @@ u_s = x_1 - (1 - sigma_min) * z
 loss = || v_theta(x_s, s, condition) - u_s ||^2
 ```
 
-CosyVoice's flow code uses the same shape of target in `compute_loss`, so an adapter can be trained without changing the overall flow formulation.
+CosyVoice 的 `compute_loss()` 正在使用同类形式。因此我们可以不改 flow 的大框架，只在 frozen velocity 旁边训练一个残差。
 
-### 1.2 Conditional flow matching in TTS
+### 1.2 Conditional Flow Matching 在 TTS 中的使用
 
-Matcha-TTS uses optimal-transport conditional flow matching for non-autoregressive mel generation. It is relevant because it demonstrates that an ODE decoder can generate high-quality mel spectrograms in a small number of synthesis steps:
+Matcha-TTS 用 optimal-transport conditional flow matching 做非自回归 mel 生成，证明 CFM/ODE decoder 可以在少量采样步里生成可用语音：
 
 - Matcha-TTS paper: https://arxiv.org/abs/2309.03199
 - Matcha-TTS code: https://github.com/shivammehta25/Matcha-TTS
 
-F5-TTS uses flow matching with a DiT-style backbone and shows that flow-matching TTS can support expressive zero-shot synthesis:
+F5-TTS 使用 flow matching 和 DiT 风格结构做 zero-shot TTS，说明 flow matching + transformer 作为语音生成主干已经是可行路线：
 
 - F5-TTS paper: https://arxiv.org/abs/2410.06885
 - F5-TTS code: https://github.com/SWivid/F5-TTS
 
-Voicebox is another important reference because it uses a non-autoregressive flow-matching model conditioned on audio context and text:
+Voicebox 也是关键参考，它使用非自回归 flow-matching 模型，并通过文本和音频上下文控制 speech infilling：
 
 - Voicebox paper: https://arxiv.org/abs/2306.15687
 
-These systems support the engineering premise that the vector field during speech generation is a meaningful intervention point. They do not prove that emotion and semantics are linearly separable.
+这些工作支持一个工程判断：flow velocity 是值得干预的位置。但它们不能证明情绪和语义天然线性可分。
 
-### 1.3 Guidance and controllability
+### 1.3 Guidance 与可控生成
 
-Classifier-free guidance combines conditional and unconditional model predictions to control fidelity/diversity without a separate classifier:
+Classifier-Free Diffusion Guidance 通过组合有条件预测和无条件预测来控制生成质量和条件跟随程度：
 
 - Classifier-Free Diffusion Guidance: https://arxiv.org/abs/2207.12598
 
-CosyVoice's CFM solver already uses a CFG-like combination in inference. The proposed adapter is similar in spirit: it changes the velocity before the Euler update, but it uses a learned residual from neutral/emotional reference contrast rather than unconditional guidance.
+CosyVoice 当前 `CausalConditionalCFM.solve_euler()` 已经在 inference 中做了 CFG 风格组合：
 
-### 1.4 Emotion/style references
+```text
+dphi_dt = (1 + cfg_rate) * dphi_dt - cfg_rate * cfg_dphi_dt
+```
 
-Global Style Tokens showed that a reference-derived style representation can control speaking style independently of text to some degree:
+本方案的 adapter 与 CFG 思路相近：都在速度场层面做控制。但不同点是，adapter 的 residual 来自 neutral/emotion reference 的对比，而不是 conditional/unconditional 的差。
+
+### 1.4 情绪、风格和参考音频
+
+Global Style Tokens 证明 reference-derived style embedding 可以在一定程度上控制说话风格：
 
 - GST paper: https://arxiv.org/abs/1803.09017
 
-StyleTTS 2 models style as a latent variable using diffusion and speech-language-model-based losses:
+StyleTTS 2 把 style 作为潜变量，用 diffusion 等方法增强风格建模：
 
 - StyleTTS 2 paper: https://arxiv.org/abs/2306.07691
 
-For parallel data, ESD is the most directly relevant public benchmark: same utterances are recorded by the same speakers under neutral, happy, angry, sad, and surprise emotions:
+真实平行情绪数据方面，ESD 最适合作为后续验证集，因为它包含同文本、同说话人的 neutral / happy / angry / sad / surprise 情绪录音：
 
 - ESD paper: https://arxiv.org/abs/2105.14762
 
-The first pass can use self-generated parallel data from CosyVoice because it is cheap and matches the current model distribution. ESD or another real parallel emotional dataset should be used before making any strong claim.
+本阶段建议先用 CosyVoice 自己生成 synthetic parallel data，因为它便宜、可控、模型分布一致。只有 synthetic tiny overfit 和评估脚本跑通后，再切到 ESD 或其他真实平行情绪数据。
 
-## 2. Current CosyVoice Code Grounding
+## 2. 当前 CosyVoice 代码依据
 
-Observed current branch:
+当前远程分支：
 
 ```text
-## exp/emotion-flow-separation-probe...origin/exp/emotion-flow-separation-probe
+exp/emotion-flow-separation-probe
 ```
 
-Model config from the local CosyVoice3 checkpoint:
+CosyVoice3 checkpoint 配置中的 flow 结构：
 
-- `flow` is `cosyvoice.flow.flow.CausalMaskedDiffWithDiT`.
-- The decoder is `cosyvoice.flow.flow_matching.CausalConditionalCFM`.
-- The estimator is `cosyvoice.flow.DiT.dit.DiT`.
-- The mel/velocity channel dimension is 80.
-- The DiT estimator has `dim=1024`, `depth=22`, `heads=16`, `out_channels=80`.
-- Inference uses Euler solver and `inference_cfg_rate=0.7`.
+- `flow`：`cosyvoice.flow.flow.CausalMaskedDiffWithDiT`
+- `decoder`：`cosyvoice.flow.flow_matching.CausalConditionalCFM`
+- `estimator`：`cosyvoice.flow.DiT.dit.DiT`
+- mel/velocity 通道维度：80
+- DiT：`dim=1024`，`depth=22`，`heads=16`，`out_channels=80`
+- inference：Euler solver，`inference_cfg_rate=0.7`
 
-Relevant code locations:
+关键代码入口：
 
 - `cosyvoice/cli/model.py:425-448`
-  - `CosyVoice3Model.token2wav()` calls `self.flow.inference(...)`, then passes generated mel to the HiFT vocoder.
+  - `CosyVoice3Model.token2wav()` 调用 `self.flow.inference(...)`，然后把 mel 交给 HiFT vocoder。
 - `cosyvoice/flow/flow.py:369-414`
-  - `CausalMaskedDiffWithDiT.inference()` concatenates prompt and target speech tokens, produces text/semantic condition `h`, creates `cond` from prompt mel frames, calls `self.decoder(...)`, and removes prompt mel frames.
+  - `CausalMaskedDiffWithDiT.inference()` 拼接 prompt token 和 target token，生成文本/语义条件 `h`，构造 prompt mel 条件 `cond`，调用 decoder，最后裁掉 prompt mel。
 - `cosyvoice/flow/flow_matching.py:71-124`
-  - `solve_euler()` repeatedly calls `forward_estimator(...)`, applies CFG, and performs `x = x + dt * dphi_dt`.
+  - `solve_euler()` 每个 Euler 步调用 `forward_estimator(...)`，做 CFG 组合，然后执行 `x = x + dt * dphi_dt`。
 - `cosyvoice/flow/flow_matching.py:155-193`
-  - `compute_loss()` samples flow time `s`, samples noise `z`, builds noised mel `y`, target velocity `u`, then trains the estimator by MSE.
+  - `compute_loss()` 随机采样 flow time `s`，采样噪声 `z`，构造 noised mel `y` 和目标速度 `u`，用 MSE 训练 estimator。
 - `cosyvoice/flow/DiT/dit.py:145-170`
-  - `DiT.forward()` accepts `(x, mask, mu, t, spks, cond, streaming)` and returns a tensor in mel/velocity space.
+  - `DiT.forward()` 接收 `(x, mask, mu, t, spks, cond, streaming)`，输出 `[B,80,K]` 的 velocity-like tensor。
 
-The clean intervention point is after the base DiT velocity has been computed and after CFG combination has produced the final base velocity. At that point, the adapter can add a generated-region-only residual before the Euler update:
+因此最干净的插入点是：base DiT velocity 计算完成、CFG 组合完成之后，在 Euler 更新之前：
 
 ```text
 v_base = guided_base_velocity(x_s, mask, mu, s, speaker, neutral_cond)
@@ -120,80 +137,82 @@ v_new = v_base + alpha * generated_region_mask * delta_v
 x_next = x_s + ds * v_new
 ```
 
-## 3. Hypothesis
+`generated_region_mask` 很重要：不要把 residual 加到 prompt/reference mel 区域，只对生成区间生效。
 
-The testable hypothesis is:
+## 3. 可检验假设
 
-> For a frozen CosyVoice3 flow, a small adapter trained on same-text same-speaker neutral/emotional pairs can learn a residual velocity component that increases target emotion classifier scores across an `alpha` ladder while mostly preserving transcript and speaker identity.
+弱假设，也就是本阶段真正要验证的内容：
 
-The stronger claim is explicitly not made:
+> 对冻结的 CosyVoice3 flow，使用同文本同说话人的 neutral/emotional 平行数据，可以训练一个小 adapter，使 `alpha` 增大时目标情绪得分上升，同时文本内容和说话人特征尽量保持稳定。
 
-> The model has perfectly separated semantic and emotional flow factors.
+强假设，本阶段不能声称：
 
-The adapter channel is expected to be entangled with prosody, duration, loudness, and local spectral shape. The experiment is useful only if evaluation shows controllable emotion changes without unacceptable semantic/speaker drift.
+> 模型内部已经把语义 flow 和情绪 flow 完全分解成两个独立因子。
 
-## 4. Approaches Considered
+即使实验成功，`delta_v` 也可能混合了 F0、能量、节奏、时长、频谱包络等因素。它最多能说明：在当前模型和数据分布下，有一个可用的 emotion-biased velocity residual。
 
-### Approach A: Inference-only residual probing
+## 4. 方案比较
 
-Use existing source/target condition swaps, hard switch, and crossfade demos. This is already useful for diagnosis but cannot learn an emotion direction. It should remain a smoke test.
+### 方案 A：只做 inference residual probe
 
-Pros:
+沿用已有 demo：source/reference、target-emotion reference、hard switch、crossfade。
 
-- No training risk.
-- Fast and directly audible.
+优点：
 
-Cons:
+- 不训练，风险最低。
+- 能快速听到 reference 切换效果。
 
-- Does not answer whether a residual velocity component is learnable.
-- Current first-round demos showed weak emotion separation except for the extreme prompt pair.
+缺点：
 
-### Approach B: Adapter-only residual flow training
+- 不能回答 residual 是否可训练。
+- 第一轮 demo 中 angry 等情绪区分不稳定。
 
-Freeze CosyVoice and train a small adapter that predicts `delta_v` from neutral/emotional reference contrast and current flow state.
+结论：保留为 smoke test，不作为主路线。
 
-Pros:
+### 方案 B：adapter-only residual flow 训练
 
-- Matches the user's formula.
-- Keeps risk bounded.
-- Can be overfit-tested on tiny synthetic parallel data.
-- Produces measurable `alpha` control.
+冻结 CosyVoice，训练一个小模块预测 `delta_v`。
 
-Cons:
+优点：
 
-- May learn acoustic shortcuts.
-- May be sensitive to noisy synthetic labels.
-- Needs careful evaluation to avoid false disentanglement claims.
+- 符合用户给出的公式。
+- 风险小，不污染完整模型。
+- 可以先在极小 synthetic set 上 overfit，失败也有清晰结论。
+- 可以自然得到 `alpha` 强度控制。
 
-Recommendation: start here.
+缺点：
 
-### Approach C: Fine-tune the full flow
+- 可能学到能量、时长等捷径。
+- synthetic emotion 标签可能有噪声。
+- 需要严谨 ablation，避免假阳性。
 
-Train or LoRA-tune CosyVoice's DiT flow directly.
+结论：推荐本阶段使用。
 
-Pros:
+### 方案 C：全 flow fine-tune 或 LoRA
 
-- More capacity.
+优点：
 
-Cons:
+- 容量更大。
 
-- Violates the current boundary.
-- Higher risk of content/speaker degradation.
-- Harder to attribute effects to a residual channel.
+缺点：
 
-Do not use in this phase.
+- 违反当前边界。
+- 结果更难归因到 residual 通道。
+- 更容易损坏内容和说话人一致性。
 
-## 5. Proposed Training Data
+结论：本阶段不做。
 
-### 5.1 Synthetic parallel data first
+## 5. 数据设计
 
-Each training tuple:
+### 5.1 第一阶段使用 synthetic parallel data
+
+每条训练样本：
 
 ```json
 {
   "utt_id": "synth_000001_happy",
   "speaker_id": "spk_0001",
-  "text": "same text for all emotions",
+  "text": "同一句文本",
   "neutral_wav": "/test1208/zw/ctm_emotion_tts/data/parallel_synth/spk_0001/text_0001/neutral.wav",
   "emotion_wav": "/test1208/zw/ctm_emotion_tts/data/parallel_synth/spk_0001/text_0001/happy.wav",
   "emotion": "happy",
@@ -204,124 +223,134 @@ Each training tuple:
 }
 ```
 
-Generation policy:
+生成原则：
 
-- Same text, same speaker reference.
-- Neutral instruction, then angry/happy/sad instruction.
-- Keep prompt reference constant across neutral/emotional versions.
-- Save generator instruction text and random seed when possible.
-- Store all wavs and a JSONL manifest.
-- Run emotion2vec on every generated wav and keep only pairs where the target label is stronger than neutral.
+- 同一个 text。
+- 同一个 speaker reference。
+- 先生成 neutral，再生成 angry / happy / sad。
+- 记录 instruction、seed、prompt_wav、输出 wav 路径。
+- 每个 wav 跑 emotion2vec。
+- 只保留 target emotion 明显强于 neutral 的 pair。
 
-Recommended first scale:
+建议最小 smoke 规模：
 
-- 3 speakers or references.
-- 20 texts.
-- 3 emotions: angry, happy, sad.
-- 180 emotional tuples plus 60 neutral controls.
+- 1 个 speaker reference。
+- 4 条文本。
+- 3 个情绪：angry / happy / sad。
+- 12 条 emotional pair，加 4 条 neutral control。
 
-Minimum smoke scale:
+建议第一轮 tiny overfit 规模：
 
-- 1 speaker.
-- 4 texts.
-- 3 emotions.
-- 12 emotional tuples plus 4 neutral controls.
+- 3 个 speaker/reference。
+- 20 条文本。
+- 3 个情绪。
+- 180 条 emotional tuple，加 60 条 neutral control。
 
-### 5.2 Real parallel data after synthetic smoke
+### 5.2 第二阶段再使用真实平行数据
 
-Use ESD as the first real benchmark because it contains parallel utterances across neutral, happy, angry, sad, and surprise for Chinese and English speakers. The real-data phase should not start until the adapter overfits a tiny synthetic set and the evaluation script is stable.
+ESD 是后续首选真实 benchmark，因为它具有同文本同说话人的多情绪录音。真实数据阶段应该等 synthetic tiny overfit、alpha ladder、ablation 都跑通之后再开始。
 
-## 6. Feature Preparation
+## 6. 特征准备
 
-For each wav:
+每个 wav 需要缓存：
 
-- Resample or load according to the CosyVoice frontend requirements.
-- Extract mel features using the same CosyVoice feature path as inference/training.
-- Extract speech tokens where needed for `mu`.
-- Extract speaker embedding from the same reference as the base generation.
-- Cache feature tensors to avoid recomputing during adapter training.
+- CosyVoice 使用的 mel feature。
+- speech token 或生成 `mu` 所需的 token 条件。
+- speaker embedding。
+- prompt mel。
+- neutral condition。
+- emotion condition。
+- `emotion_delta_cond = emotion_cond - neutral_cond`。
 
-Feature record:
+建议 `.pt` 记录包含：
 
-```text
-neutral_feat:  [80, K]
-emotion_feat:  [80, K]
-prompt_feat:   [K_prompt, 80]
-mu:            [80, K_total]
-mask:          [1, K_total]
-speaker:       [80]
-emotion_label: int
-emotion_delta_condition: [80, K_total]
+```python
+{
+    "utt_id": str,
+    "text": str,
+    "emotion": str,
+    "emotion_id": int,
+    "neutral_feat": torch.Tensor,       # [80, K]
+    "emotion_feat": torch.Tensor,       # [80, K]
+    "prompt_feat": torch.Tensor,        # [K_prompt, 80]
+    "mu": torch.Tensor,                 # [80, K_total]
+    "mask": torch.Tensor,               # [1, K_total]
+    "spks": torch.Tensor,               # [80]
+    "neutral_cond": torch.Tensor,       # [80, K_total]
+    "delta_cond": torch.Tensor,         # [80, K_total]
+    "generated_start": int,
+}
 ```
 
-Length issue:
+长度问题：
 
-- Neutral and emotional generated wavs may have different lengths.
-- For the first adapter loss, align mel length by truncating to the shorter generated region after removing prompt frames.
-- Store the original lengths and track duration drift in evaluation.
-- Later, add DTW/soft alignment if truncation hides important prosodic changes.
+- neutral 和 emotional wav 可能长度不同。
+- 第一版直接截断到较短生成区间，避免复杂对齐影响主实验。
+- 记录原始长度，并在评估中报告 duration drift。
+- 如果截断导致结果不稳定，再引入 DTW 或 soft alignment。
 
-## 7. Adapter Architecture
+## 7. Adapter 结构
 
-### 7.1 Minimal module
+### 7.1 最小模块
 
-The first module should be small enough to overfit quickly:
+第一版 adapter 应该足够小，便于 overfit 和定位问题：
 
 ```text
 EmotionVelocityAdapter
-  input channels:
+  输入通道：
     x_s                   80
     mu                    80
     neutral_cond          80
     emotion_delta_cond    80
-    time embedding        16 broadcast channels
-    emotion embedding     16 broadcast channels
-  bottleneck:
+    flow time embedding   16
+    emotion embedding     16
+  主体：
     Conv1d(352, 256, kernel=3)
     SiLU
     Conv1d(256, 256, kernel=3, dilation=2)
     SiLU
     Conv1d(256, 80, kernel=1)
-  output:
+  输出：
     delta_v [B, 80, K]
 ```
 
-Use zero initialization for the final projection. This makes `alpha=0` and untrained adapter behavior exactly preserve the frozen base path.
+最后一层必须 zero-init。这样 adapter 未训练时，`delta_v = 0`，不会改变 base path。
 
-### 7.2 Conditioning choice
+### 7.2 为什么 adapter 不只看 `emotion_ref - neutral_ref`
 
-The user formula says:
+用户公式中写的是：
 
 ```text
 delta_v = adapter(emotion_ref - neutral_ref)
 ```
 
-In code, the safest first implementation is:
+工程落地时建议改成：
 
 ```text
 emotion_delta_cond = emotion_cond - neutral_cond
 delta_v = adapter(x_s, mu, s, speaker, neutral_cond, emotion_delta_cond, emotion_label)
 ```
 
-Reason:
+原因：
 
-- If the adapter sees only `emotion_ref - neutral_ref`, it cannot adapt the residual to the current flow state `x_s` or local token/mel frame.
-- If it sees `x_s`, `mu`, and `s`, it can predict a velocity residual with the right shape and stage-specific behavior.
-- The emotion delta still remains the main controllable input.
+- velocity residual 与当前 flow state `x_s` 有关。
+- residual 在不同 flow time `s` 的意义不同。
+- residual 必须对齐到当前 mel/token 帧 `k`。
+- `emotion_delta_cond` 仍然是主控制信号，但不是唯一输入。
 
-### 7.3 Generated-region mask
+### 7.3 只作用于生成区间
 
-Do not apply the residual to prompt frames. The residual must be multiplied by a generated-region mask:
+必须使用：
 
 ```text
 delta_v = delta_v * mask * generated_region_mask
 ```
 
-This prevents prompt/reference mel corruption and keeps the experiment aligned with online replanning.
+这样 prompt/reference 区间不会被 adapter 污染。
 
-## 8. Training Objective
+## 8. 训练目标
 
-For an emotional target `x_1^emo`, sample the same flow path used by CosyVoice:
+对 emotional target `x_1^emo`，采样 CosyVoice 原本的 flow path：
 
 ```text
 s ~ Uniform(0, 1)
@@ -330,7 +359,7 @@ x_s^emo = (1 - (1 - sigma_min) * s) * z + s * x_1^emo
 u_s^emo = x_1^emo - (1 - sigma_min) * z
 ```
 
-Run frozen base with neutral condition:
+冻结 base estimator，用 neutral condition 计算：
 
 ```text
 v_base = stopgrad(flow_estimator(x_s^emo, mask, mu, s, speaker, neutral_cond))
@@ -338,14 +367,7 @@ delta_v = adapter(x_s^emo, mask, mu, s, speaker, neutral_cond, emotion_delta_con
 v_new = v_base + alpha * delta_v
 ```
 
-Primary loss:
-
-```text
-L_velocity = MSE(mask * generated_region_mask * v_new,
-                 mask * generated_region_mask * u_s^emo)
-```
-
-Equivalent residual target view:
+第一版建议直接训练 residual target：
 
 ```text
 delta_target = stopgrad(u_s^emo - v_base)
@@ -353,30 +375,26 @@ L_residual = MSE(mask * generated_region_mask * delta_v,
                  mask * generated_region_mask * delta_target)
 ```
 
-Use `L_residual` first because it isolates the adapter's target and avoids accidental gradients through frozen modules.
-
-Neutral invariance:
+中性约束：
 
 ```text
 L_neutral_zero = mean(|| adapter(..., emotion_delta_cond=0) ||_2)
 ```
 
-Contrastive emotion structure:
+情绪结构辅助约束：
 
 ```text
 pooled_delta = masked_mean(delta_v, k)
 L_emotion_cls = CE(linear(pooled_delta), emotion_label)
 ```
 
-This auxiliary classifier is only for shaping the residual; it should not be interpreted as proof of disentanglement.
-
-Regularization:
+残差幅度约束：
 
 ```text
 L_norm = mean(||delta_v||_2 / (||v_base||_2 + eps))
 ```
 
-Total first-pass loss:
+第一版总 loss：
 
 ```text
 L = L_residual
@@ -385,137 +403,136 @@ L = L_residual
   + 0.01 * L_norm
 ```
 
-Start with `alpha=1.0` in training. Test the continuous alpha ladder only at evaluation.
+训练时先固定 `alpha=1.0`。`alpha` 连续可控性放到 evaluation 阶段验证。
 
-## 9. Training Stages
+## 9. 训练阶段
 
-### Stage 0: instrumentation only
+### Stage 0：instrumentation
 
-Deliverables:
+目标：
 
-- A hook that logs `v_base`, `delta_v`, norm ratio, cosine similarity, and tensor shapes at each Euler step.
-- A zero-initialized adapter that produces exactly the base audio when `alpha=0` and nearly base audio when untrained with `alpha>0`.
+- 插入 adapter hook。
+- 记录 `v_base`、`delta_v`、shape、norm ratio、cosine similarity。
+- 验证 zero-init adapter 不改变 base 输出。
 
-Pass criteria:
+通过标准：
 
-- `delta_v` shape is `[B,80,K]`.
-- Generated-region mask excludes prompt frames.
-- Base output unchanged when adapter is disabled.
+- `delta_v` shape 为 `[B,80,K]`。
+- generated-region mask 正确排除 prompt frames。
+- adapter disabled 或 `alpha=0` 时 base 输出不变。
 
-### Stage 1: synthetic parallel feature cache
+### Stage 1：synthetic feature cache
 
-Deliverables:
+目标：
 
-- JSONL manifest for neutral/emotional pairs.
-- Cached `.pt` feature records.
-- emotion2vec scores for all wavs.
+- 生成或登记 neutral/emotional wav pair。
+- 写入 JSONL manifest。
+- 缓存 feature `.pt`。
+- 写 emotion2vec score。
 
-Pass criteria:
+通过标准：
 
-- At least one tuple per emotion has target emotion2vec score above neutral.
-- Bad pairs are filtered rather than silently used.
+- 每个 emotion 至少有可用 pair。
+- emotion2vec 显示 target emotion 强于 neutral。
+- 不合格 pair 被过滤，而不是静默混入训练。
 
-### Stage 2: tiny overfit
+### Stage 2：tiny overfit
 
-Train on 12 emotional tuples.
+用 12 条 emotional tuple 训练。
 
-Pass criteria:
+通过标准：
 
-- `L_residual` decreases over 200-1000 steps.
-- Adapter norm does not explode.
-- `alpha=0` reproduces neutral/base behavior.
-- `alpha=1` audibly moves at least one emotion in the target direction.
+- `L_residual` 在 200-1000 steps 内下降。
+- adapter norm 不爆炸。
+- `alpha=0` 保持 neutral/base 行为。
+- `alpha=1` 至少在一个情绪上产生可听变化。
 
-### Stage 3: alpha ladder evaluation
+### Stage 3：alpha ladder
 
-Generate:
+生成：
 
 ```text
 alpha = 0.00, 0.25, 0.50, 0.75, 1.00, 1.25
 ```
 
-For each output:
+每个输出记录：
 
-- emotion2vec label and score.
-- ASR transcript or token-level content proxy.
-- speaker similarity if available.
-- duration and energy drift.
-- residual norm ratio and cosine against `v_base`.
+- emotion2vec label 和 score。
+- ASR transcript 或 token-level 内容代理指标。
+- speaker similarity。
+- duration / energy drift。
+- residual norm ratio。
+- `delta_v` 与 `v_base` 的 cosine similarity。
 
-Pass criteria:
+通过标准：
 
-- Target emotion score trends upward for at least one emotion.
-- Transcript remains stable.
-- Speaker similarity does not collapse.
-- No strong clipping or duration blow-up.
+- 至少一个 emotion 的 target score 随 alpha 上升。
+- transcript 基本稳定。
+- speaker similarity 不明显崩溃。
+- 没有明显 clipping 或 duration blow-up。
 
-### Stage 4: ablations
+### Stage 4：ablation
 
-Required ablations:
+必须做：
 
-- Random emotion reference.
-- Mismatched text reference.
-- Wrong emotion label.
-- `emotion_delta_cond=0`.
-- Negative `alpha`.
-- Direct mel-delta baseline without velocity adapter.
+- random emotion reference。
+- mismatched text reference。
+- wrong emotion label。
+- `emotion_delta_cond=0`。
+- negative `alpha`。
+- direct mel-delta baseline。
 
-These ablations determine whether the residual is learning a meaningful emotion path or merely amplifying energy/noise.
+这些 ablation 用来判断 residual 是否真的在学情绪方向，而不是简单放大能量、噪声或时长。
 
-## 10. Proposed Code Layout
+## 10. 建议代码布局
 
-Create:
+新增：
 
 - `cosyvoice/flow/emotion_adapter.py`
   - `EmotionVelocityAdapter`
   - `make_generated_region_mask`
-  - small pooled auxiliary emotion head
+  - residual stats helper
 
 - `cosyvoice/flow/emotion_guided_flow.py`
-  - wrapper around frozen `CausalConditionalCFM`
-  - adapter-aware `solve_euler_emotion(...)`
-  - adapter training helper `compute_adapter_residual_loss(...)`
+  - 对 frozen `CausalConditionalCFM` 的非侵入式 wrapper
+  - `solve_euler_emotion(...)`
+  - `compute_adapter_residual_loss(...)`
 
 - `examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py`
-  - generate or register same-text same-speaker neutral/emotional wavs
-  - save manifest JSONL
+  - 生成或登记 same-text same-speaker neutral/emotional wav
 
 - `examples/ctm_emotion_flow/prepare_parallel_features.py`
-  - load manifest
-  - extract/cache mel/token/speaker features
-  - write feature index
+  - 从 manifest 提取并缓存 mel/token/speaker 条件
 
 - `examples/ctm_emotion_flow/train_flow_emotion_adapter.py`
-  - load frozen CosyVoice3
-  - train adapter only
-  - save checkpoints under `/test1208/zw/ctm_emotion_tts/models/emotion_flow_adapter/`
+  - 只训练 adapter
+  - checkpoint 保存到 `/test1208/zw/ctm_emotion_tts/models/emotion_flow_adapter/`
 
 - `examples/ctm_emotion_flow/eval_emotion_adapter.py`
-  - generate alpha ladder wavs
-  - run emotion2vec/ASR/speaker metrics where available
-  - write report JSON and markdown
+  - 生成 alpha ladder wav
+  - 跑 emotion2vec / ASR / speaker metrics
 
 - `examples/ctm_emotion_flow/config/adapter_tiny.yaml`
-  - model/data/training/eval defaults
+  - 路径、模型参数、训练参数、评估参数
 
-Tests:
+测试：
 
 - `tests/ctm_emotion_flow/test_emotion_adapter.py`
-  - shape, dtype, zero-init, masking.
+  - shape、dtype、zero-init、masking。
 - `tests/ctm_emotion_flow/test_adapter_loss.py`
-  - residual loss with fake tensors and frozen fake estimator.
+  - fake tensor 下验证 residual loss。
 - `tests/ctm_emotion_flow/test_alpha_injection.py`
-  - `alpha=0` equals base velocity; `alpha=1` adds residual only in generated region.
+  - `alpha=0` 等于 base velocity，`alpha=1` 只加在生成区间。
 
-Docs:
+文档：
 
 - `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md`
 - `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md`
 - `docs/superpowers/plans/2026-05-31-flow-emotion-adapter-training.md`
 
-## 11. Minimal Commands for the Future Training Pass
+## 11. 未来训练命令草案
 
-Use interactive bash on the server:
+进入服务器：
 
 ```bash
 ssh sai-gpu160
@@ -525,7 +542,7 @@ nvidia-smi -i 0
 export CUDA_VISIBLE_DEVICES=0
 ```
 
-Build synthetic manifest:
+生成 synthetic manifest：
 
 ```bash
 python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
@@ -536,7 +553,7 @@ python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
   --emotions angry happy sad
 ```
 
-Prepare features:
+准备 feature：
 
 ```bash
 python examples/ctm_emotion_flow/prepare_parallel_features.py \
@@ -545,55 +562,55 @@ python examples/ctm_emotion_flow/prepare_parallel_features.py \
   --out-index /test1208/zw/ctm_emotion_tts/data/parallel_synth/features/index.jsonl
 ```
 
-Tiny overfit:
+tiny overfit：
 
 ```bash
-python examples/ctm_emotion_flow/train_flow_emotion_adapter.py \
+CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/train_flow_emotion_adapter.py \
   --config examples/ctm_emotion_flow/config/adapter_tiny.yaml \
   --feature-index /test1208/zw/ctm_emotion_tts/data/parallel_synth/features/index.jsonl \
   --output-dir /test1208/zw/ctm_emotion_tts/models/emotion_flow_adapter/tiny_overfit \
   --max-steps 1000 \
-  --batch-size 2
+  --batch-size 1
 ```
 
-Evaluate alpha ladder:
+评估 alpha ladder：
 
 ```bash
-python examples/ctm_emotion_flow/eval_emotion_adapter.py \
+CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/eval_emotion_adapter.py \
   --config examples/ctm_emotion_flow/config/adapter_tiny.yaml \
   --checkpoint /test1208/zw/ctm_emotion_tts/models/emotion_flow_adapter/tiny_overfit/adapter.pt \
   --out-dir /test1208/zw/ctm_emotion_tts/outputs/emotion_flow_adapter_alpha_ladder \
   --alphas 0 0.25 0.5 0.75 1.0 1.25
 ```
 
-## 12. Expected Blockers
+## 12. 预期 blocker
 
-Likely blockers:
+可能问题：
 
-- Synthetic generated pairs may not be truly parallel in duration/prosody.
-- CosyVoice instruction emotion may be inconsistent, especially for angry.
-- Emotion2vec may saturate on generated audio and overstate success.
-- Residual might mostly change energy/F0 while damaging intelligibility.
-- Unrolled Euler training may be too memory-heavy if implemented too early.
-- Flow CFG path currently uses a two-item batch; adapter injection must be careful not to corrupt the unconditional branch.
+- synthetic pair 的时长和韵律不完全平行。
+- instruction 生成的 angry / sad 等标签不稳定。
+- emotion2vec 对生成音频可能过度自信。
+- residual 可能只学到 loudness/F0，而不是有效情绪方向。
+- 过早 unroll Euler 训练会显存高。
+- CosyVoice 当前 CFG 用两条 batch 分支，adapter 不能污染 unconditional 分支。
 
-Mitigations:
+缓解策略：
 
-- Start with residual-target loss, not full unrolled audio loss.
-- Keep all base modules frozen.
-- Evaluate alpha monotonicity and ablations before scaling data.
-- Report failure explicitly if residual is non-meaningful.
-- Move to ESD real parallel data after synthetic smoke, not before.
+- 第一版训练 residual target，不做完整 unrolled audio loss。
+- 所有 base 模块冻结。
+- 先 tiny overfit，再 alpha ladder，再 ablation。
+- 失败也记录为路线结论。
+- synthetic 通过后再换 ESD。
 
-## 13. Decision
+## 13. 最终路线判断
 
-The recommended next engineering route is:
+推荐下一步：
 
-1. Implement zero-initialized `EmotionVelocityAdapter`.
-2. Add adapter-aware solver wrapper while preserving the original solver.
-3. Build synthetic parallel manifest and feature cache.
-4. Train tiny adapter on residual target.
-5. Evaluate alpha ladder with emotion2vec plus content/speaker checks.
-6. Only if this passes, move to ESD and stronger validation.
+1. 实现 zero-init `EmotionVelocityAdapter`。
+2. 增加 adapter-aware solver wrapper，不改原始 solver 行为。
+3. 构建 synthetic parallel manifest 和 feature cache。
+4. 用 residual target 训练 tiny adapter。
+5. 做 alpha ladder 和 emotion2vec/content/speaker 评估。
+6. 通过后再进入 ESD 真实平行数据验证。
 
-The route is meaningful because it tests a specific mechanistic question at the exact velocity-field level. It remains scientifically modest: success would show a controllable emotion-biased residual channel, not a complete semantic/emotion factorization.
+这条路线有实际意义，因为它直接在 flow velocity 层验证“情绪速度残差”是否可学、可控、可听。它的结论应保持克制：成功只能说明存在一个可用的 emotion-biased residual channel，不能说明语义和情绪已经被完美因子化。

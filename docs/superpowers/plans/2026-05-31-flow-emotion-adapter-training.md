@@ -1,49 +1,49 @@
-# Flow Emotion Adapter Training Implementation Plan
+# 情绪 Flow Adapter 训练实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给后续 agent 的要求：** 实现本计划时，必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，按任务逐步执行。所有步骤使用 checkbox 追踪。
 
-**Goal:** Build a small adapter-only training path that tests whether CosyVoice3 flow velocity can accept a learnable emotion residual channel.
+**目标：** 在不训练完整 CosyVoice 的前提下，增加一个小型 adapter-only 训练流程，验证 CosyVoice3 flow velocity 是否能接受一个可学习的情绪残差通道。
 
-**Architecture:** Keep CosyVoice3 frozen and add a zero-initialized `EmotionVelocityAdapter` around the flow solver. Train the adapter on parallel neutral/emotional mel pairs by regressing the frozen base velocity residual, then evaluate alpha-controlled generation.
+**架构：** CosyVoice3 主体全部冻结，只在 flow solver 外侧增加 zero-init `EmotionVelocityAdapter`。训练时用 neutral/emotional 平行 mel pair 回归 frozen base velocity 的 residual；评估时用 `alpha` 控制情绪强度。
 
-**Tech Stack:** Python, PyTorch, CosyVoice3, CosyVoice CFM/DiT flow, FunASR emotion2vec, pytest.
+**技术栈：** Python、PyTorch、CosyVoice3、CosyVoice CFM/DiT flow、FunASR emotion2vec、pytest。
 
 ---
 
-## File Structure
+## 文件结构
 
-- Create `cosyvoice/flow/emotion_adapter.py`
-  - Small adapter module, generated-frame mask helper, residual stats helper.
-- Create `cosyvoice/flow/emotion_guided_flow.py`
-  - Non-invasive wrapper for frozen `CausalConditionalCFM`; original CosyVoice solver remains unchanged.
-- Create `examples/ctm_emotion_flow/config/adapter_tiny.yaml`
-  - Model paths, data paths, adapter hyperparameters, training/eval defaults.
-- Create `examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py`
-  - Generate or register synthetic parallel neutral/emotional wav pairs.
-- Create `examples/ctm_emotion_flow/prepare_parallel_features.py`
-  - Convert manifest wavs into cached mel/token/speaker feature records.
-- Create `examples/ctm_emotion_flow/train_flow_emotion_adapter.py`
-  - Train adapter only; save `adapter.pt`, logs, and config copy.
-- Create `examples/ctm_emotion_flow/eval_emotion_adapter.py`
-  - Generate alpha ladder wavs and score emotion/content/speaker metrics.
-- Create `tests/ctm_emotion_flow/test_emotion_adapter.py`
-  - Shape, zero-init, masking tests.
-- Create `tests/ctm_emotion_flow/test_adapter_loss.py`
-  - Residual target loss with fake tensors.
-- Create `tests/ctm_emotion_flow/test_alpha_injection.py`
-  - Verify `alpha=0` and generated-region-only injection.
-- Create `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md`
-  - Long research/design report.
-- Create `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md`
-  - Short route summary.
+- 新增 `cosyvoice/flow/emotion_adapter.py`
+  - 小型 adapter 模块、生成区间 mask、residual 统计工具。
+- 新增 `cosyvoice/flow/emotion_guided_flow.py`
+  - 对 frozen `CausalConditionalCFM` 的非侵入式 wrapper；原始 CosyVoice solver 不改。
+- 新增 `examples/ctm_emotion_flow/config/adapter_tiny.yaml`
+  - 模型路径、数据路径、adapter 超参、训练和评估默认值。
+- 新增 `examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py`
+  - 生成或登记 synthetic neutral/emotional 平行 wav。
+- 新增 `examples/ctm_emotion_flow/prepare_parallel_features.py`
+  - 把 manifest 中的 wav 转成缓存的 mel/token/speaker feature record。
+- 新增 `examples/ctm_emotion_flow/train_flow_emotion_adapter.py`
+  - 只训练 adapter，保存 `adapter.pt`、日志和 config 副本。
+- 新增 `examples/ctm_emotion_flow/eval_emotion_adapter.py`
+  - 生成 alpha ladder wav，并记录 emotion/content/speaker 指标。
+- 新增 `tests/ctm_emotion_flow/test_emotion_adapter.py`
+  - shape、zero-init、masking 测试。
+- 新增 `tests/ctm_emotion_flow/test_adapter_loss.py`
+  - fake tensor 下的 residual target loss 测试。
+- 新增 `tests/ctm_emotion_flow/test_alpha_injection.py`
+  - 验证 `alpha=0` 和 generated-region-only injection。
+- 新增 `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md`
+  - 中文详细设计报告。
+- 新增 `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md`
+  - 中文简要路线报告。
 
-## Task 1: Adapter Module
+## Task 1: Adapter 模块
 
-**Files:**
-- Create: `cosyvoice/flow/emotion_adapter.py`
-- Test: `tests/ctm_emotion_flow/test_emotion_adapter.py`
+**文件：**
+- 新增：`cosyvoice/flow/emotion_adapter.py`
+- 测试：`tests/ctm_emotion_flow/test_emotion_adapter.py`
 
-- [ ] **Step 1: Write the adapter shape and zero-init test**
+- [ ] **Step 1: 先写 shape 和 zero-init 测试**
 
 ```python
 import torch
@@ -72,21 +72,21 @@ def test_generated_region_mask_excludes_prompt_frames():
     assert mask[0, 0, 3:].sum().item() == 7
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [ ] **Step 2: 运行测试，确认失败原因正确**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_emotion_adapter.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 ModuleNotFoundError: No module named 'cosyvoice.flow.emotion_adapter'
 ```
 
-- [ ] **Step 3: Implement `EmotionVelocityAdapter`**
+- [ ] **Step 3: 实现 `EmotionVelocityAdapter`**
 
 ```python
 from dataclasses import dataclass
@@ -158,21 +158,21 @@ def residual_stats(delta_v: torch.Tensor, v_base: torch.Tensor, mask: torch.Tens
     )
 ```
 
-- [ ] **Step 4: Run the test and confirm it passes**
+- [ ] **Step 4: 运行测试，确认通过**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_emotion_adapter.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 2 passed
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add cosyvoice/flow/emotion_adapter.py tests/ctm_emotion_flow/test_emotion_adapter.py
@@ -181,11 +181,11 @@ git commit -m "feat: add emotion velocity adapter"
 
 ## Task 2: Residual Loss Helper
 
-**Files:**
-- Create: `cosyvoice/flow/emotion_guided_flow.py`
-- Test: `tests/ctm_emotion_flow/test_adapter_loss.py`
+**文件：**
+- 新增：`cosyvoice/flow/emotion_guided_flow.py`
+- 测试：`tests/ctm_emotion_flow/test_adapter_loss.py`
 
-- [ ] **Step 1: Write the residual loss test**
+- [ ] **Step 1: 写 residual loss 测试**
 
 ```python
 import torch
@@ -233,21 +233,21 @@ def test_residual_loss_matches_target_residual():
     assert stats["delta_v_shape"] == [1, 80, 5]
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [ ] **Step 2: 运行测试，确认失败原因正确**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_adapter_loss.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 ModuleNotFoundError: No module named 'cosyvoice.flow.emotion_guided_flow'
 ```
 
-- [ ] **Step 3: Implement the residual loss helper**
+- [ ] **Step 3: 实现 residual loss helper**
 
 ```python
 from typing import Dict, Tuple
@@ -305,34 +305,34 @@ def compute_adapter_residual_loss(
     return loss, stats
 ```
 
-- [ ] **Step 4: Run the test and confirm it passes**
+- [ ] **Step 4: 运行测试，确认通过**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_adapter_loss.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 1 passed
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add cosyvoice/flow/emotion_guided_flow.py tests/ctm_emotion_flow/test_adapter_loss.py
 git commit -m "feat: add adapter residual loss"
 ```
 
-## Task 3: Alpha Injection Contract
+## Task 3: Alpha 注入契约
 
-**Files:**
-- Modify: `cosyvoice/flow/emotion_guided_flow.py`
-- Test: `tests/ctm_emotion_flow/test_alpha_injection.py`
+**文件：**
+- 修改：`cosyvoice/flow/emotion_guided_flow.py`
+- 测试：`tests/ctm_emotion_flow/test_alpha_injection.py`
 
-- [ ] **Step 1: Write alpha injection tests**
+- [ ] **Step 1: 写 alpha injection 测试**
 
 ```python
 import torch
@@ -357,42 +357,42 @@ def test_residual_applies_only_to_generated_region():
     assert torch.allclose(out[:, :, 2:], torch.ones_like(out[:, :, 2:]) * 2.0)
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [ ] **Step 2: 运行测试，确认失败原因正确**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_alpha_injection.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 ImportError: cannot import name 'apply_emotion_residual'
 ```
 
-- [ ] **Step 3: Implement `apply_emotion_residual`**
+- [ ] **Step 3: 实现 `apply_emotion_residual`**
 
 ```python
 def apply_emotion_residual(*, v_base: torch.Tensor, delta_v: torch.Tensor, alpha: float, mask: torch.Tensor) -> torch.Tensor:
     return v_base + float(alpha) * delta_v * mask
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: 运行测试**
 
-Run:
+运行：
 
 ```bash
 pytest tests/ctm_emotion_flow/test_alpha_injection.py tests/ctm_emotion_flow/test_adapter_loss.py -q
 ```
 
-Expected:
+预期：
 
 ```text
 3 passed
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add cosyvoice/flow/emotion_guided_flow.py tests/ctm_emotion_flow/test_alpha_injection.py
@@ -401,10 +401,10 @@ git commit -m "feat: define emotion residual alpha contract"
 
 ## Task 4: Tiny Config
 
-**Files:**
-- Create: `examples/ctm_emotion_flow/config/adapter_tiny.yaml`
+**文件：**
+- 新增：`examples/ctm_emotion_flow/config/adapter_tiny.yaml`
 
-- [ ] **Step 1: Create the config**
+- [ ] **Step 1: 创建 config**
 
 ```yaml
 project_root: /test1208/zw/ctm_emotion_tts
@@ -430,7 +430,7 @@ adapter:
 
 training:
   seed: 20260531
-  batch_size: 2
+  batch_size: 1
   max_steps: 1000
   learning_rate: 0.0001
   sigma_min: 0.000001
@@ -444,9 +444,9 @@ eval:
   output_dir: /test1208/zw/ctm_emotion_tts/outputs/emotion_flow_adapter_alpha_ladder
 ```
 
-- [ ] **Step 2: Validate the config file parses**
+- [ ] **Step 2: 验证 config 可以解析**
 
-Run:
+运行：
 
 ```bash
 python - <<'PY'
@@ -460,13 +460,13 @@ print("config ok")
 PY
 ```
 
-Expected:
+预期：
 
 ```text
 config ok
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
 git add examples/ctm_emotion_flow/config/adapter_tiny.yaml
@@ -475,10 +475,10 @@ git commit -m "chore: add tiny emotion adapter config"
 
 ## Task 5: Synthetic Parallel Manifest Builder
 
-**Files:**
-- Create: `examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py`
+**文件：**
+- 新增：`examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py`
 
-- [ ] **Step 1: Implement manifest schema validation before generation**
+- [ ] **Step 1: 先实现 manifest schema 和写入函数**
 
 ```python
 from dataclasses import dataclass, asdict
@@ -507,7 +507,7 @@ def write_manifest(items: list[ParallelItem], out_path: Path) -> None:
             f.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
 ```
 
-- [ ] **Step 2: Add CLI dry-run mode**
+- [ ] **Step 2: 增加 dry-run CLI**
 
 ```python
 import argparse
@@ -541,9 +541,9 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 3: Run dry-run manifest**
+- [ ] **Step 3: 运行 dry-run manifest**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
@@ -551,23 +551,28 @@ python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
   --out-manifest /test1208/zw/ctm_emotion_tts/data/parallel_synth/manifest.dryrun.jsonl
 ```
 
-Expected:
+预期：
 
 ```text
-file exists: /test1208/zw/ctm_emotion_tts/data/parallel_synth/manifest.dryrun.jsonl
+生成 /test1208/zw/ctm_emotion_tts/data/parallel_synth/manifest.dryrun.jsonl
 ```
 
-- [ ] **Step 4: Add real CosyVoice generation after dry-run passes**
+- [ ] **Step 4: dry-run 通过后再接入真实 CosyVoice 生成**
 
-Use the existing first-round inference pattern from `/test1208/zw/ctm_emotion_tts/generate_extreme_emotion_pair.py`:
+参考已有脚本：
 
-```python
-from cosyvoice.cli.cosyvoice import CosyVoice3
+```text
+/test1208/zw/ctm_emotion_tts/generate_extreme_emotion_pair.py
 ```
 
-The generation function must save neutral first, then angry/happy/sad for the same `text` and `prompt_wav`. It must write every wav path to the manifest and skip no errors silently.
+真实生成函数必须：
 
-- [ ] **Step 5: Commit**
+- 对同一 text 和同一 prompt_wav 先生成 neutral。
+- 再生成 angry / happy / sad。
+- 每个 wav 保存路径写入 manifest。
+- 每个错误显式记录，不允许静默跳过。
+
+- [ ] **Step 5: 提交**
 
 ```bash
 git add examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py
@@ -576,10 +581,10 @@ git commit -m "feat: add synthetic parallel manifest builder"
 
 ## Task 6: Feature Cache Builder
 
-**Files:**
-- Create: `examples/ctm_emotion_flow/prepare_parallel_features.py`
+**文件：**
+- 新增：`examples/ctm_emotion_flow/prepare_parallel_features.py`
 
-- [ ] **Step 1: Implement cached feature record writer**
+- [ ] **Step 1: 实现 feature record 和 index 写入**
 
 ```python
 from dataclasses import dataclass, asdict
@@ -609,9 +614,9 @@ def write_index(items: list[FeatureItem], out_path: Path) -> None:
             f.write(json.dumps(asdict(item), ensure_ascii=False) + "\n")
 ```
 
-- [ ] **Step 2: Store tensors with exact keys**
+- [ ] **Step 2: 固定 `.pt` record key**
 
-Each `.pt` record must contain:
+每个 `.pt` record 必须包含：
 
 ```python
 {
@@ -631,9 +636,9 @@ Each `.pt` record must contain:
 }
 ```
 
-- [ ] **Step 3: Add fake-tensor smoke mode**
+- [ ] **Step 3: 增加 fake-tensor smoke mode**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/prepare_parallel_features.py \
@@ -641,25 +646,25 @@ python examples/ctm_emotion_flow/prepare_parallel_features.py \
   --out-index /test1208/zw/ctm_emotion_tts/data/parallel_synth/features/index.fake.jsonl
 ```
 
-Expected:
+预期：
 
 ```text
 wrote 1 fake feature record
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: 提交**
 
 ```bash
 git add examples/ctm_emotion_flow/prepare_parallel_features.py
 git commit -m "feat: add parallel feature cache builder"
 ```
 
-## Task 7: Adapter Training Script
+## Task 7: Adapter 训练脚本
 
-**Files:**
-- Create: `examples/ctm_emotion_flow/train_flow_emotion_adapter.py`
+**文件：**
+- 新增：`examples/ctm_emotion_flow/train_flow_emotion_adapter.py`
 
-- [ ] **Step 1: Implement dataset loader**
+- [ ] **Step 1: 实现 dataset loader**
 
 ```python
 import json
@@ -680,7 +685,7 @@ class ParallelFeatureDataset(Dataset):
         return torch.load(item["feature_path"], map_location="cpu")
 ```
 
-- [ ] **Step 2: Implement collate for batch size 1 first**
+- [ ] **Step 2: 第一版只支持 batch size 1**
 
 ```python
 def collate_one(batch):
@@ -690,7 +695,7 @@ def collate_one(batch):
     return {k: (v.unsqueeze(0) if torch.is_tensor(v) else v) for k, v in item.items()}
 ```
 
-- [ ] **Step 3: Freeze CosyVoice estimator and train adapter only**
+- [ ] **Step 3: 冻结 CosyVoice estimator，只训练 adapter**
 
 ```python
 for parameter in estimator.parameters():
@@ -699,23 +704,21 @@ adapter.train()
 optimizer = torch.optim.AdamW(adapter.parameters(), lr=cfg["training"]["learning_rate"])
 ```
 
-- [ ] **Step 4: Log residual stats every step**
+- [ ] **Step 4: 每步记录 residual stats**
 
-Write JSONL rows to:
+日志路径：
 
 ```text
 /test1208/zw/ctm_emotion_tts/logs/emotion_flow_adapter_train.jsonl
 ```
 
-Each row:
+每行格式：
 
 ```json
 {"step": 1, "loss": 0.123, "emotion": "happy", "residual_norm": 4.2, "base_norm": 80.1, "norm_ratio": 0.052}
 ```
 
-- [ ] **Step 5: Save adapter checkpoint**
-
-Save:
+- [ ] **Step 5: 保存 adapter checkpoint**
 
 ```python
 torch.save(
@@ -728,9 +731,9 @@ torch.save(
 )
 ```
 
-- [ ] **Step 6: Run fake smoke training**
+- [ ] **Step 6: 运行 fake smoke training**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/train_flow_emotion_adapter.py \
@@ -740,7 +743,7 @@ python examples/ctm_emotion_flow/train_flow_emotion_adapter.py \
   --max-steps 2
 ```
 
-Expected:
+预期：
 
 ```text
 step=1 loss=
@@ -748,19 +751,19 @@ step=2 loss=
 saved adapter.pt
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: 提交**
 
 ```bash
 git add examples/ctm_emotion_flow/train_flow_emotion_adapter.py
 git commit -m "feat: add emotion adapter training script"
 ```
 
-## Task 8: Alpha Ladder Evaluation
+## Task 8: Alpha Ladder 评估
 
-**Files:**
-- Create: `examples/ctm_emotion_flow/eval_emotion_adapter.py`
+**文件：**
+- 新增：`examples/ctm_emotion_flow/eval_emotion_adapter.py`
 
-- [ ] **Step 1: Implement alpha loop contract**
+- [ ] **Step 1: 实现 alpha 解析**
 
 ```python
 def parse_alphas(values: list[str]) -> list[float]:
@@ -771,9 +774,9 @@ def alpha_tag(alpha: float) -> str:
     return f"alpha_{alpha:.2f}".replace(".", "p")
 ```
 
-- [ ] **Step 2: Save per-alpha output manifest**
+- [ ] **Step 2: 保存 per-alpha output manifest**
 
-Each generated row:
+每条生成记录：
 
 ```json
 {
@@ -787,9 +790,9 @@ Each generated row:
 }
 ```
 
-- [ ] **Step 3: Add fake eval mode**
+- [ ] **Step 3: 增加 fake eval mode**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/eval_emotion_adapter.py \
@@ -798,42 +801,42 @@ python examples/ctm_emotion_flow/eval_emotion_adapter.py \
   --out-dir /test1208/zw/ctm_emotion_tts/outputs/emotion_flow_adapter_alpha_ladder_fake
 ```
 
-Expected:
+预期：
 
 ```text
 wrote evaluation manifest
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: 提交**
 
 ```bash
 git add examples/ctm_emotion_flow/eval_emotion_adapter.py
 git commit -m "feat: add alpha ladder evaluation script"
 ```
 
-## Task 9: Real Tiny Run Gate
+## Task 9: 真实 Tiny Run Gate
 
-**Files:**
-- No new files.
-- Uses scripts from Tasks 5-8.
+**文件：**
+- 不新增文件。
+- 使用 Task 5-8 的脚本。
 
-- [ ] **Step 1: Check GPU0**
+- [ ] **Step 1: 检查 GPU0**
 
-Run:
+运行：
 
 ```bash
 nvidia-smi -i 0
 ```
 
-Expected:
+预期：
 
 ```text
-GPU 0 visible; no unexpected high-memory process started by this experiment
+GPU0 可见，且没有本实验之外的异常高显存占用需要处理。
 ```
 
-- [ ] **Step 2: Build a 12-pair synthetic manifest**
+- [ ] **Step 2: 构建 12-pair synthetic manifest**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
@@ -844,15 +847,15 @@ python examples/ctm_emotion_flow/build_synthetic_parallel_manifest.py \
   --emotions angry happy sad
 ```
 
-Expected:
+预期：
 
 ```text
-12 emotional pairs plus neutral wavs
+生成 12 条 emotional pair 和对应 neutral wav。
 ```
 
-- [ ] **Step 3: Prepare real feature cache**
+- [ ] **Step 3: 准备真实 feature cache**
 
-Run:
+运行：
 
 ```bash
 python examples/ctm_emotion_flow/prepare_parallel_features.py \
@@ -861,15 +864,15 @@ python examples/ctm_emotion_flow/prepare_parallel_features.py \
   --out-index /test1208/zw/ctm_emotion_tts/data/parallel_synth/features/index.tiny.jsonl
 ```
 
-Expected:
+预期：
 
 ```text
 wrote 12 feature records
 ```
 
-- [ ] **Step 4: Train tiny overfit**
+- [ ] **Step 4: tiny overfit**
 
-Run:
+运行：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/train_flow_emotion_adapter.py \
@@ -880,16 +883,15 @@ CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/train_flow_emotion_adapt
   --batch-size 1
 ```
 
-Expected:
+预期：
 
 ```text
-loss decreases relative to first 20-step moving average
-adapter.pt saved
+loss 相比前 20 step moving average 有下降，adapter.pt 已保存。
 ```
 
-- [ ] **Step 5: Evaluate alpha ladder**
+- [ ] **Step 5: alpha ladder 评估**
 
-Run:
+运行：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/eval_emotion_adapter.py \
@@ -900,39 +902,39 @@ CUDA_VISIBLE_DEVICES=0 python examples/ctm_emotion_flow/eval_emotion_adapter.py 
   --alphas 0 0.25 0.5 0.75 1.0 1.25
 ```
 
-Expected:
+预期：
 
 ```text
-evaluation manifest and wavs saved
+生成 evaluation manifest 和 wav。
 ```
 
-## Task 10: Report Update Gate
+## Task 10: 报告更新 Gate
 
-**Files:**
-- Modify: `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md`
-- Modify: `docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md`
+**文件：**
+- 修改：`docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md`
+- 修改：`docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md`
 
-- [ ] **Step 1: Add actual run evidence**
+- [ ] **Step 1: 写入真实运行证据**
 
-Record:
+必须记录：
 
 ```text
-GPU0 status before run:
-commands:
-manifest path:
-feature index path:
-adapter checkpoint:
-alpha ladder output:
-loss trend:
-emotion2vec trend:
-content/speaker checks:
-blockers:
-route decision:
+GPU0 状态：
+运行命令：
+manifest 路径：
+feature index 路径：
+adapter checkpoint：
+alpha ladder 输出：
+loss 趋势：
+emotion2vec 趋势：
+content/speaker 检查：
+blocker：
+路线判断：
 ```
 
-- [ ] **Step 2: Run privacy scan**
+- [ ] **Step 2: 运行隐私扫描**
 
-Run:
+运行：
 
 ```bash
 python - <<'PY'
@@ -954,48 +956,52 @@ print("privacy scan ok")
 PY
 ```
 
-Expected:
+预期：
 
 ```text
 privacy scan ok
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
 git add docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_DETAILED_REPORT.md docs/ctm_emotion_flow/FLOW_EMOTION_ADAPTER_BRIEF.md
 git commit -m "docs: report emotion adapter training probe"
 ```
 
-## Self-Review
+## 自检
 
-Spec coverage:
+覆盖情况：
 
-- Adapter-only training: covered by Tasks 1-3 and 7.
-- Same-text same-speaker neutral/emotional data: covered by Task 5.
-- Parallel feature preparation: covered by Task 6.
-- Alpha-controlled flow generation: covered by Tasks 3 and 8.
-- No full CosyVoice training: all tasks freeze the base model.
-- Detailed and brief documentation: covered by Task 10.
+- adapter-only 训练：Task 1-3 和 Task 7 覆盖。
+- 同文本同说话人 neutral/emotional 数据：Task 5 覆盖。
+- 平行 feature 准备：Task 6 覆盖。
+- alpha-controlled flow generation：Task 3 和 Task 8 覆盖。
+- 不训练完整 CosyVoice：所有任务都冻结 base model。
+- 中文详细和简要文档：Task 10 覆盖。
 
-Placeholder scan:
+占位检查：
 
-- No `TBD` or unresolved implementation placeholders are left.
-- The real generation function in Task 5 is intentionally gated after dry-run and points to the existing local inference pattern to avoid duplicating unstable inference code in the plan.
+- 没有未解决的占位内容。
+- Task 5 的真实生成函数故意放在 dry-run 之后接入，避免先写不稳定推理逻辑。
 
-Type consistency:
+类型一致性：
 
-- `flow_s` is used for flow time.
-- Mel/speech frame axis is consistently `K`.
-- Adapter output is always `[B, 80, K]`.
+- flow 时间统一写作 `flow_s` 或 `s`。
+- mel/speech frame 轴统一写作 `K`。
+- adapter 输出始终为 `[B,80,K]`。
 
-## Execution Options
+## 执行选择
 
-Plan complete and saved to `docs/superpowers/plans/2026-05-31-flow-emotion-adapter-training.md`.
+计划已保存到：
 
-Two execution options:
+```text
+docs/superpowers/plans/2026-05-31-flow-emotion-adapter-training.md
+```
 
-1. Subagent-Driven: dispatch a fresh worker per task and review after each task.
-2. Inline Execution: execute this plan in the current session with checkpoints.
+建议后续执行顺序：
 
-Recommended first execution target: Task 1 through Task 4 only, then stop for review before touching real GPU generation or training.
+1. 先执行 Task 1-4，只做 adapter、loss helper、alpha contract 和 config。
+2. 停下来 review。
+3. 再执行 Task 5-8。
+4. 最后在用户确认后执行 Task 9 的真实 GPU tiny run。
