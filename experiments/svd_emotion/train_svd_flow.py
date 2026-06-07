@@ -102,13 +102,19 @@ def enable_grad_checkpointing(estimator) -> int:
     return len(blocks)
 
 
-def build_flow_inputs(flow, batch: dict, device: torch.device) -> dict:
-    """L1 encoder pipeline: tokens/feat -> (mu, spks, cond, x_1, mask)."""
-    token = batch["speech_token_emo"].to(device).long()
-    token_len = batch["speech_token_emo_len"].to(device)
-    feat = batch["speech_feat_emo"].to(device)
-    feat_len = batch["speech_feat_emo_len"].to(device)
-    embedding = batch["embedding_emo"].to(device)
+def build_flow_inputs(flow, batch: dict, device: torch.device,
+                      side: str = "emo") -> dict:
+    """L1 encoder pipeline: tokens/feat -> (mu, spks, cond, x_1, mask, K_eff).
+
+    Args:
+      side: "emo" or "neu" -- selects which side of the parallel pair to use.
+    """
+    suffix = side
+    token = batch[f"speech_token_{suffix}"].to(device).long()
+    token_len = batch[f"speech_token_{suffix}_len"].to(device)
+    feat = batch[f"speech_feat_{suffix}"].to(device)
+    feat_len = batch[f"speech_feat_{suffix}_len"].to(device)
+    embedding = batch[f"embedding_{suffix}"].to(device)
 
     embedding = F.normalize(embedding, dim=1)
     spks = flow.spk_embed_affine_layer(embedding)
@@ -146,27 +152,59 @@ def masked_mean_time(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def compute_svd_loss(v_hat: torch.Tensor, u_true: torch.Tensor,
+                     v_hat_neu: torch.Tensor,
                      emo_feat: torch.Tensor, neu_feat: torch.Tensor,
                      emo_mask: torch.Tensor, neu_mask: torch.Tensor,
+                     common_mask: torch.Tensor,
                      k_svd: int, lambdas=(1.0, 0.1, 0.1)):
-    """Compute the 3-term loss. SVD is done in fp32 for numerical stability."""
-    # Promote to fp32 around SVD (bf16 SVD can blow up).
-    v32 = v_hat.float()
-    A, B_top, _ = svd_decompose(v32, k_svd)
+    """Three-term loss with VELOCITY-space emotion target (Step-0 setup).
 
+    L_fm:  masked MSE(v_hat, u_true)                                -- TTS anchor
+    L_sem: per-channel time-avg MSE(B_top, neu_feat (time-avg))     -- soft pull
+    L_emo: 1 - cos(vec(A_crop_masked), vec(v_hat - v_hat_neu)_crop_masked)
+           target_dir = v_hat[:,:,:K_c] - v_hat_neu[:,:,:K_c] in velocity space.
+           This matches the Step 0 diagnostic where cos(A, r) measured 0.29
+           naturally pre-training. (The earlier mel-diff target was hurt by
+           linear interpolation destroying phone-level correspondence.)
+
+    Args:
+      v_hat:      (B, 80, K_emo)  emo forward, with grad
+      u_true:     (B, 80, K_emo)  true CFM velocity for emo
+      v_hat_neu:  (B, 80, K_neu)  neu forward, no_grad
+      emo_feat:   (B, 80, K_emo)
+      neu_feat:   (B, 80, K_neu)
+      emo_mask:   (B, 1, K_emo)
+      neu_mask:   (B, 1, K_neu)
+      common_mask:(B, 1, K_common) where K_common = min(K_emo, K_neu)
+      k_svd:      int
+      lambdas:    (lambda_fm, lambda_sem, lambda_emo)
+    """
+    v32 = v_hat.float()
+    v32_neu = v_hat_neu.float()
+    A, B_top, _ = svd_decompose(v32, k_svd)
+    emo_feat_f = emo_feat.float()
+    neu_feat_f = neu_feat.float()
+
+    # --- L_fm ---
     sq = (v32 - u_true.float()).pow(2) * emo_mask
     denom = emo_mask.sum() * v32.shape[1] + 1e-6
     L_fm = sq.sum() / denom
 
+    # --- L_sem: time-avg per channel ---
     B_mean = masked_mean_time(B_top, emo_mask)
-    A_mean = masked_mean_time(A, emo_mask)
-    emo_mel_mean = masked_mean_time(emo_feat.float(), emo_mask)
-    neu_mel_mean = masked_mean_time(neu_feat.float(), neu_mask)
+    neu_mean = masked_mean_time(neu_feat_f, neu_mask)
+    L_sem = F.mse_loss(B_mean, neu_mean)
 
-    L_sem = F.mse_loss(B_mean, neu_mel_mean)
-
-    target_dir = emo_mel_mean - neu_mel_mean
-    cos_A_target = F.cosine_similarity(A_mean, target_dir, dim=-1)
+    # --- L_emo: velocity-space cosine on common crop ---
+    K_c = common_mask.shape[-1]
+    v_emo_c = v32[..., :K_c]
+    v_neu_c = v32_neu[..., :K_c]
+    target_dir = v_emo_c - v_neu_c                  # (B, 80, K_c)
+    A_c = A[..., :K_c]
+    mask_full = common_mask.expand_as(A_c)
+    A_flat = (A_c * mask_full).flatten(start_dim=1)
+    tgt_flat = (target_dir * mask_full).flatten(start_dim=1)
+    cos_A_target = F.cosine_similarity(A_flat, tgt_flat, dim=-1)
     L_emo = (1.0 - cos_A_target).mean()
 
     total = lambdas[0] * L_fm + lambdas[1] * L_sem + lambdas[2] * L_emo
@@ -182,6 +220,7 @@ def compute_svd_loss(v_hat: torch.Tensor, u_true: torch.Tensor,
         "B_over_v_ratio": float(
             (torch.linalg.vector_norm(B_top) /
              torch.linalg.vector_norm(v32).clamp(min=1e-6)).detach()),
+        "K_common": int(K_c),
     }
     return total, diag
 
@@ -283,9 +322,11 @@ def main():
                 continue
 
             with torch.no_grad():
-                inp = build_flow_inputs(flow, batch, device)
-            x_1 = inp["x_1"]
-            mu = inp["mu"]; spks = inp["spks"]; cond = inp["cond"]; mask = inp["mask"]
+                inp_emo = build_flow_inputs(flow, batch, device, side="emo")
+                inp_neu = build_flow_inputs(flow, batch, device, side="neu")
+            x_1 = inp_emo["x_1"]
+            mu = inp_emo["mu"]; spks = inp_emo["spks"]
+            cond = inp_emo["cond"]; mask = inp_emo["mask"]
 
             y, t_samp, z, u_true = cfm_perturb(x_1)
 
@@ -294,17 +335,30 @@ def main():
                     y, mask, mu, t_samp, spks, cond, streaming=False
                 )
 
-            # Build neu-side feat tensor + mask
-            neu_feat = batch["speech_feat_neu"].to(device).transpose(1, 2)
-            neu_len = batch["speech_feat_neu_len"].to(device)
-            neu_mask = (~make_pad_mask(neu_len, max_len=neu_feat.shape[-1])).to(spks).unsqueeze(1)
+            # ---- Second forward on neu side (no_grad to save memory) ----
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp):
+                y_neu, _, _, _ = cfm_perturb(inp_neu["x_1"])
+                v_hat_neu = flow.decoder.estimator(
+                    y_neu, inp_neu["mask"], inp_neu["mu"], t_samp,
+                    inp_neu["spks"], inp_neu["cond"], streaming=False
+                )
+
+            neu_feat = inp_neu["x_1"]       # (B, 80, K_neu)
+            neu_mask = inp_neu["mask"]
             emo_feat = x_1; emo_mask = mask
 
-            # Loss is computed in fp32 (svd_decompose casts internally)
+            # Build common mask: min length across both sides per sample
+            K_emo_t = x_1.shape[-1]; K_neu_t = inp_neu["x_1"].shape[-1]
+            K_c = min(K_emo_t, K_neu_t)
+            emo_len = inp_emo["K_eff"]; neu_len = inp_neu["K_eff"]
+            common_len = torch.minimum(emo_len, neu_len).clamp(max=K_c)
+            common_mask = (~make_pad_mask(common_len, max_len=K_c)).to(spks).unsqueeze(1)
+
             loss, diag = compute_svd_loss(
-                v_hat=v_hat, u_true=u_true,
+                v_hat=v_hat, u_true=u_true, v_hat_neu=v_hat_neu,
                 emo_feat=emo_feat, neu_feat=neu_feat,
                 emo_mask=emo_mask, neu_mask=neu_mask,
+                common_mask=common_mask,
                 k_svd=args.k_svd,
                 lambdas=(args.lambda_fm, args.lambda_sem, args.lambda_emo),
             )
