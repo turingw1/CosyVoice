@@ -1,0 +1,212 @@
+{
+  "source": "recomputed from log",
+  "log_path": "/test1208/zw/ctm_emotion_tts/logs/svd_v2/step0_v1.log",
+  "n_pairs": 20,
+  "per_pair": [
+    {
+      "emotion": "Happy",
+      "key": "0002_text00063",
+      "r_over_vneu": 0.485,
+      "cos_v_emo_v_neu": 0.882,
+      "cos_svdA_trueR": 0.267,
+      "cos_svdB_vneu": 0.889
+    },
+    {
+      "emotion": "Happy",
+      "key": "0015_text00183",
+      "r_over_vneu": 0.344,
+      "cos_v_emo_v_neu": 0.939,
+      "cos_svdA_trueR": 0.31,
+      "cos_svdB_vneu": 0.945
+    },
+    {
+      "emotion": "Happy",
+      "key": "0008_text00220",
+      "r_over_vneu": 0.372,
+      "cos_v_emo_v_neu": 0.934,
+      "cos_svdA_trueR": 0.285,
+      "cos_svdB_vneu": 0.942
+    },
+    {
+      "emotion": "Happy",
+      "key": "0016_text00229",
+      "r_over_vneu": 0.389,
+      "cos_v_emo_v_neu": 0.924,
+      "cos_svdA_trueR": 0.272,
+      "cos_svdB_vneu": 0.93
+    },
+    {
+      "emotion": "Happy",
+      "key": "0004_text00070",
+      "r_over_vneu": 0.416,
+      "cos_v_emo_v_neu": 0.923,
+      "cos_svdA_trueR": 0.269,
+      "cos_svdB_vneu": 0.928
+    },
+    {
+      "emotion": "Sad",
+      "key": "0005_text00329",
+      "r_over_vneu": 0.371,
+      "cos_v_emo_v_neu": 0.944,
+      "cos_svdA_trueR": 0.284,
+      "cos_svdB_vneu": 0.949
+    },
+    {
+      "emotion": "Sad",
+      "key": "0014_text00026",
+      "r_over_vneu": 0.361,
+      "cos_v_emo_v_neu": 0.935,
+      "cos_svdA_trueR": 0.299,
+      "cos_svdB_vneu": 0.94
+    },
+    {
+      "emotion": "Sad",
+      "key": "0007_text00238",
+      "r_over_vneu": 0.374,
+      "cos_v_emo_v_neu": 0.927,
+      "cos_svdA_trueR": 0.296,
+      "cos_svdB_vneu": 0.934
+    },
+    {
+      "emotion": "Sad",
+      "key": "0002_text00249",
+      "r_over_vneu": 0.46,
+      "cos_v_emo_v_neu": 0.891,
+      "cos_svdA_trueR": 0.265,
+      "cos_svdB_vneu": 0.898
+    },
+    {
+      "emotion": "Sad",
+      "key": "0004_text00331",
+      "r_over_vneu": 0.382,
+      "cos_v_emo_v_neu": 0.927,
+      "cos_svdA_trueR": 0.276,
+      "cos_svdB_vneu": 0.932
+    },
+    {
+      "emotion": "Angry",
+      "key": "0006_text00135",
+      "r_over_vneu": 0.337,
+      "cos_v_emo_v_neu": 0.942,
+      "cos_svdA_trueR": 0.29,
+      "cos_svdB_vneu": 0.947
+    },
+    {
+      "emotion": "Angry",
+      "key": "0003_text00345",
+      "r_over_vneu": 0.406,
+      "cos_v_emo_v_neu": 0.916,
+      "cos_svdA_trueR": 0.29,
+      "cos_svdB_vneu": 0.923
+    },
+    {
+      "emotion": "Angry",
+      "key": "0010_text00125",
+      "r_over_vneu": 0.388,
+      "cos_v_emo_v_neu": 0.925,
+      "cos_svdA_trueR": 0.288,
+      "cos_svdB_vneu": 0.931
+    },
+    {
+      "emotion": "Angry",
+      "key": "0002_text00263",
+      "r_over_vneu": 0.376,
+      "cos_v_emo_v_neu": 0.935,
+      "cos_svdA_trueR": 0.345,
+      "cos_svdB_vneu": 0.942
+    },
+    {
+      "emotion": "Angry",
+      "key": "0012_text00070",
+      "r_over_vneu": 0.292,
+      "cos_v_emo_v_neu": 0.96,
+      "cos_svdA_trueR": 0.342,
+      "cos_svdB_vneu": 0.966
+    },
+    {
+      "emotion": "Surprise",
+      "key": "0007_text00324",
+      "r_over_vneu": 0.395,
+      "cos_v_emo_v_neu": 0.919,
+      "cos_svdA_trueR": 0.263,
+      "cos_svdB_vneu": 0.925
+    },
+    {
+      "emotion": "Surprise",
+      "key": "0013_text00368",
+      "r_over_vneu": 0.401,
+      "cos_v_emo_v_neu": 0.917,
+      "cos_svdA_trueR": 0.3,
+      "cos_svdB_vneu": 0.924
+    },
+    {
+      "emotion": "Surprise",
+      "key": "0007_text00018",
+      "r_over_vneu": 0.383,
+      "cos_v_emo_v_neu": 0.925,
+      "cos_svdA_trueR": 0.274,
+      "cos_svdB_vneu": 0.93
+    },
+    {
+      "emotion": "Surprise",
+      "key": "0003_text00384",
+      "r_over_vneu": 0.352,
+      "cos_v_emo_v_neu": 0.936,
+      "cos_svdA_trueR": 0.327,
+      "cos_svdB_vneu": 0.943
+    },
+    {
+      "emotion": "Surprise",
+      "key": "0020_text00333",
+      "r_over_vneu": 0.318,
+      "cos_v_emo_v_neu": 0.948,
+      "cos_svdA_trueR": 0.335,
+      "cos_svdB_vneu": 0.954
+    }
+  ],
+  "per_emotion_stats": {
+    "Happy": {
+      "n": 5,
+      "mean_r_over_vneu": 0.40120000000000006,
+      "mean_cos_v_emo_v_neu": 0.9204000000000001,
+      "mean_cos_svdA_trueR": 0.2806,
+      "mean_cos_svdB_vneu": 0.9268000000000001
+    },
+    "Sad": {
+      "n": 5,
+      "mean_r_over_vneu": 0.3896,
+      "mean_cos_v_emo_v_neu": 0.9248000000000001,
+      "mean_cos_svdA_trueR": 0.28400000000000003,
+      "mean_cos_svdB_vneu": 0.9306000000000001
+    },
+    "Angry": {
+      "n": 5,
+      "mean_r_over_vneu": 0.3598,
+      "mean_cos_v_emo_v_neu": 0.9356000000000002,
+      "mean_cos_svdA_trueR": 0.311,
+      "mean_cos_svdB_vneu": 0.9418000000000001
+    },
+    "Surprise": {
+      "n": 5,
+      "mean_r_over_vneu": 0.3698,
+      "mean_cos_v_emo_v_neu": 0.9289999999999999,
+      "mean_cos_svdA_trueR": 0.29979999999999996,
+      "mean_cos_svdB_vneu": 0.9352
+    }
+  },
+  "overall": {
+    "n": 20,
+    "mean_r_over_vneu": 0.3801,
+    "mean_cos_v_emo_v_neu": 0.92745,
+    "mean_cos_svdA_trueR": 0.29385,
+    "mean_cos_svdB_vneu": 0.9336000000000002
+  },
+  "pass_report": {
+    "test1_energy_pass": true,
+    "test1_energy_mean": 0.3801,
+    "test4_A_aligns_r_pass": true,
+    "test4_A_aligns_r_mean": 0.29385,
+    "test5_B_aligns_vneu_pass": true,
+    "test5_B_aligns_vneu_mean": 0.9336000000000002
+  }
+}

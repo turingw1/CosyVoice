@@ -279,7 +279,7 @@ def main():
     all_r_avg = [v for vecs in avg_r_by_emo.values() for v in vecs]
     if all_r_avg:
         R = torch.stack(all_r_avg, dim=0)                    # (N, 80)
-        stacked_spec = singular_spectrum_summary(R.unsqueeze(0))
+        stacked_spec = singular_spectrum_summary(R)
     else:
         stacked_spec = {}
 
