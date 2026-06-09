@@ -52,6 +52,7 @@ from cosyvoice.cli.cosyvoice import AutoModel                                # n
 from cosyvoice.utils.mask import make_pad_mask                                # noqa: E402
 
 from experiments.svd_emotion.svd_decompose import svd_decompose               # noqa: E402
+from experiments.svd_emotion.train_svd_flow import EmotionResidualHead          # noqa: E402
 
 logging.basicConfig(format="[%(asctime)s] %(levelname)s: %(message)s",
                     datefmt="%H:%M:%S", level=logging.INFO)
@@ -63,7 +64,8 @@ def svd_alpha_solve_euler(decoder, x_init, mu, mask, spks, cond,
                           n_timesteps: int = 10, k_svd: int = 16,
                           alpha: float = 1.0,
                           use_cfg: bool = False,
-                          collect_diag: bool = True):
+                          collect_diag: bool = True,
+                          emotion_head: "EmotionResidualHead | None" = None):
     """Custom Euler loop replacing CausalConditionalCFM.solve_euler.
 
     Mirrors CFG / non-CFG behaviour of the original; at each step the velocity
@@ -114,8 +116,16 @@ def svd_alpha_solve_euler(decoder, x_init, mu, mask, spks, cond,
         else:
             v_raw = decoder.estimator(x, mask, mu, s_now, spks, cond, streaming=False)
 
-        # SVD decompose: B = top-k = semantic, A = residual = emotion
-        A, B, _ = svd_decompose(v_raw, k_svd)
+        # SVD decompose: B_init = top-k = semantic, A_init = residual
+        A_init, B_init, _ = svd_decompose(v_raw, k_svd)
+
+        # v3: optional emotion_head adds learned delta on top of SVD init
+        if emotion_head is not None:
+            delta = emotion_head(v_raw.float()).to(v_raw.dtype)
+            A = A_init + delta
+            B = v_raw - A
+        else:
+            A, B = A_init, B_init
 
         # Scale residual by alpha
         v_ctrl = alpha * A + B
@@ -140,7 +150,8 @@ def svd_alpha_solve_euler(decoder, x_init, mu, mask, spks, cond,
 def synthesize_with_alpha(cosyvoice, ref_wav_path: str, ref_text: str,
                           target_text: str,
                           alpha: float, k_svd: int = 16, use_cfg: bool = False,
-                          n_timesteps: int = 10):
+                          n_timesteps: int = 10,
+                          emotion_head: "EmotionResidualHead | None" = None):
     """Run end-to-end synthesis with SVD-alpha control over the flow's velocity.
 
     Pipeline:
@@ -208,6 +219,7 @@ def synthesize_with_alpha(cosyvoice, ref_wav_path: str, ref_text: str,
         flow.decoder, z, mu, mask, spks, cond,
         n_timesteps=n_timesteps, k_svd=k_svd, alpha=alpha,
         use_cfg=use_cfg, collect_diag=True,
+        emotion_head=emotion_head,
     )
     mel = mel_full[:, :, mel_len1:].float()                                 # drop prompt section
 
@@ -220,6 +232,9 @@ def synthesize_with_alpha(cosyvoice, ref_wav_path: str, ref_text: str,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default="", help="DiT state_dict to load (optional)")
+    ap.add_argument("--head_ckpt", default="",
+                    help="v3 EmotionResidualHead state_dict (optional). When given, "
+                         "A = SVD_residual + head(v); when omitted, A = SVD_residual.")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--out_dir", required=True)
     ap.add_argument("--emotions", default="Happy,Sad,Angry,Surprise")
@@ -248,6 +263,14 @@ def main():
         sd = torch.load(args.ckpt, map_location=cosyvoice.model.device, weights_only=True)
         cosyvoice.model.flow.decoder.estimator.load_state_dict(sd, strict=True)
         LOG.info(f"loaded ckpt {args.ckpt}")
+
+    emotion_head = None
+    if args.head_ckpt:
+        emotion_head = EmotionResidualHead(mel_dim=80, hidden=128).to(cosyvoice.model.device)
+        head_sd = torch.load(args.head_ckpt, map_location=cosyvoice.model.device, weights_only=True)
+        emotion_head.load_state_dict(head_sd, strict=True)
+        emotion_head.eval()
+        LOG.info(f"loaded v3 emotion_head {args.head_ckpt}")
 
     target_emotions = [e.strip() for e in args.emotions.split(",") if e.strip()]
     alphas = [float(a) for a in args.alphas.split(",")]
@@ -288,6 +311,7 @@ def main():
                     cosyvoice, ref_path, ref_text=text, target_text=text,
                     alpha=alpha, k_svd=args.k_svd,
                     use_cfg=args.use_cfg, n_timesteps=args.n_timesteps,
+                    emotion_head=emotion_head,
                 )
                 wav_path = out_dir / f"{tag}.wav"
                 torchaudio.save(str(wav_path), wav, cosyvoice.sample_rate)
