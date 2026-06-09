@@ -137,7 +137,8 @@ def svd_alpha_solve_euler(decoder, x_init, mu, mask, spks, cond,
 
 
 @torch.inference_mode()
-def synthesize_with_alpha(cosyvoice, ref_wav_path: str, target_text: str,
+def synthesize_with_alpha(cosyvoice, ref_wav_path: str, ref_text: str,
+                          target_text: str,
                           alpha: float, k_svd: int = 16, use_cfg: bool = False,
                           n_timesteps: int = 10):
     """Run end-to-end synthesis with SVD-alpha control over the flow's velocity.
@@ -154,8 +155,11 @@ def synthesize_with_alpha(cosyvoice, ref_wav_path: str, target_text: str,
     flow = cosyvoice.model.flow
     hift = cosyvoice.model.hift
 
-    # 1. Frontend
-    mi = cosyvoice.frontend.frontend_zero_shot(target_text, "", ref_wav_path, sr, "")
+    # 1. Frontend -- CosyVoice3 requires `<|endofprompt|>` token somewhere in
+    #    text or prompt_text; prepend the system prefix to the reference text.
+    PROMPT_PREFIX = "You are a helpful assistant.<|endofprompt|>"
+    prompt_text = PROMPT_PREFIX + ref_text
+    mi = cosyvoice.frontend.frontend_zero_shot(target_text, prompt_text, ref_wav_path, sr, "")
 
     # 2. LLM tokens
     llm_tokens = []
@@ -209,7 +213,7 @@ def synthesize_with_alpha(cosyvoice, ref_wav_path: str, target_text: str,
 
     # 5. Vocoder
     hift_in = {"speech_feat": mel}
-    waveform, _ = hift.inference(speech_feat=mel, cache_source=torch.zeros(1, 1, 0, device=device))
+    waveform, _ = hift.inference(speech_feat=mel, finalize=True)
     return waveform.cpu(), diag
 
 
@@ -259,7 +263,8 @@ def main():
 
     selected = []
     for emo in target_emotions:
-        cands = [r for r in records if args.ref_emotion in r["emotions"] and emo in r["emotions"]]
+        req_ref = emo if args.ref_emotion == "target" else args.ref_emotion
+        cands = [r for r in records if req_ref in r["emotions"] and emo in r["emotions"]]
         random.shuffle(cands)
         for r in cands[:args.n_samples]:
             selected.append((emo, r))
@@ -271,13 +276,16 @@ def main():
     df = open(diag_out, "w", encoding="utf-8")
 
     for emo, rec in selected:
-        ref_path = rec["emotions"][args.ref_emotion]
+        # ref_emotion="target" means use the target-emo wav as reference
+        # (so LLM produces emo-conditioned speech tokens).
+        actual_ref = emo if args.ref_emotion == "target" else args.ref_emotion
+        ref_path = rec["emotions"][actual_ref]
         text = rec["text"]
         for alpha in alphas:
-            tag = f"{rec['key']}__refEmo_{args.ref_emotion}__alpha_{alpha:+.2f}"
+            tag = f"{rec['key']}__refEmo_{actual_ref}__alpha_{alpha:+.2f}"
             try:
                 wav, diag = synthesize_with_alpha(
-                    cosyvoice, ref_path, text,
+                    cosyvoice, ref_path, ref_text=text, target_text=text,
                     alpha=alpha, k_svd=args.k_svd,
                     use_cfg=args.use_cfg, n_timesteps=args.n_timesteps,
                 )
